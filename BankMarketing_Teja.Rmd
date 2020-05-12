@@ -1,0 +1,293 @@
+---
+title: "BankMarketing"
+author: "Krishna Teja"
+date: "4/21/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if(!require("pacman")) install.packages("pacman")
+pacman::p_load(e1071, caret, tidyverse, data.table, corrplot, rquery, fastDummies, ggbiplot, tidymodels, randomForest, class, DMwR, factoextra)
+
+```
+
+# Executive Summary
+
+Marketing strategies of banks are of various types and cellular is one among them. Bank marketing data set have 16 dependent variables for determining the result of a campaign call. Each call can end with customer subscribing to the new scheme or rejecting. Aim is to build a model that efficiently predicts the positive result of a campaign.Building such model helps prioritising the customer records. As a result efficieny of the campaigns shoot up as bank staff would target the records with more probability of subscribing.
+
+
+## Gist of DataSet
+
+Dataset consists of 45k rows and 17 variables. Out of the 17 variables, one variable comprises of output and the rest contribute to input variables. Each row represents one customer and Output variable takes the value of 0 or 1 indicating failure or success, respectively, of the campaign call with customer. 
+
+
+```{r echo = FALSE}
+bankData <- read.csv("bank-full.csv",sep = ';')
+summary(bankData)
+```
+
+# DataCleaning and Pre-processing
+
+Check for the NA values. NA values make the prediction uncertain at various levels. To avoid all the conflicts and the ambiguity cleaning up NA values is important.\
+
+Remove outliers from all the numeric data. Balance is one main column which have wide range of values with outliers. Using interquartile range concept, outliers are found and respective rows are eliminated. \
+
+Within the categorical column data, check for the categories which reveal the least about the respective variable. For Instance, 'unknown' as a category reveal nothing in some cases. So, inclusion of such rows is equivalent to possessing NA values. Before considering to cleanup, verify the proportion of such categories in each variable.\
+
+If significant part of data is creating the confusion, getting rid of columns helps more than excluding huge number of rows. 
+'poutcome' is one such feature in this case. In case of 'poutcome' 70% of data is termed 'unknown' and excluding 70% of data is not the best thing to do. Rather exclude the 'poutcome'.\
+
+```{r echo = FALSE}
+#Remove NA values
+completeData <- bankData[complete.cases(bankData), ]
+
+#Outliers
+balance_outliers <-boxplot.stats(completeData$balance)$out
+data_no_outliers <- completeData[-which(completeData$balance %in% balance_outliers), ]
+
+#Remove poutcome and unknowns.
+ggplot(data = data_no_outliers) +
+  geom_bar(mapping = aes(x = poutcome))
+cleanData <- subset( data_no_outliers, select = -poutcome)
+cleanData [cleanData == 'unknown'] <- NA
+cleanData <- cleanData[complete.cases(cleanData), ]
+
+
+#convert target categorical to numeric
+cleanData$y <- ifelse(cleanData$y == 'yes', 1, 0)
+```
+
+## Exploratory Data Analysis
+
+Types of job categories the customers possess are management, blue-collar, technician, services, admin, unemployed, entrepreneur, housemaid, retired, self-employed and student.  Managment, technician and blue-collor jobs are more common professions.      
+
+```{r echo =FALSE}
+ggplot(data = cleanData) +
+  geom_bar(mapping = aes(x = job))+
+  ggtitle("Job Category")+
+  xlab("Job")+
+  ylab("Count")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+Age group of customers vary from 15 till 80 . Majority of the customers fall into the age group of 25-40. Spikes in the data below supports this inference.
+
+```{r echo=FALSE}
+ggplot(bankData, aes(x = bankData$age)) +
+  geom_density(fill = "grey")+
+  ggtitle("Age group Variation")+
+  xlab("Age")+
+  ylab("Count")
+
+
+```
+
+July recorded the most activity followed by August and May. Least activity was recorded in December.
+```{r echo =FALSE}
+ggplot(data = cleanData) +
+  geom_bar(mapping = aes(x = month ))+
+  ggtitle("Month wise previous Activity")+
+  xlab("Month")+
+  ylab("Count")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+# Data Preparation and Analysis
+
+Features of type numeric require scaling and centering of data which will avoid the magnitude differences. For instance age will be ranging from 15-70 and account balance could go upto millions.All such different scales must be made unifrom.\
+Categorical features  have to be handled before building models with them. Dummy variables come into picture and includes additional numeiric columns equivalent to categorical data. \
+
+Once the data is preprocessed, Challenge is to choose part of dataset that defines maximum part of output variable.Correlation metrics proved that there is not much correlation between the 6 numerical features. \
+
+
+```{r echo = FALSE} 
+#Scaling
+numericBankData <- dplyr::select_if(subset(cleanData, select = -y), is.numeric)
+cleanData[names(numericBankData)] <- scale(cleanData[names(numericBankData)])
+
+#Creating dummies
+data_with_dummies <- fastDummies::dummy_cols(cleanData)
+```
+
+
+By principle component analysis we define new variables with transformed columns. By performing PCA, we lose the structure of the data but the variance between the variables is preserved.Output of PCA will be the multiple principle componenets with a count equal to number of features post preprocessing. Out of the 48 variables, top 30 explains more than 90 % of the variance. So choosing 30 variables is the best optino considering computation and efficieny.
+```{r echo = FALSE} 
+#PCA
+numericData_with_dummies <- dplyr::select_if(data_with_dummies, is.numeric)
+numericData_with_dummies <- numericData_with_dummies[, colSums(numericData_with_dummies != 0) > 0]
+pca_BankData <- prcomp(subset( numericData_with_dummies, select = -y ), scale. = TRUE, center = TRUE)
+fviz_eig(pca_BankData,ncp = 35)
+
+pca_x <- pca_BankData$x
+markData_x <- pca_x[,1:32]
+markData_y <- cleanData$y
+markData <- as.data.frame(cbind(markData_y,markData_x))
+names(markData)[1] <- 'decision'
+markData$decision <- as.factor(markData$decision)
+```
+
+
+
+```{r echo =FALSE}
+#Classification Report Function
+classification_report <- function(confmat){
+  n = sum(confmat) # number of instances
+  nc = nrow(confmat) # number of classes
+  di = diag(confmat) # number of correctly classified instances per class 
+  rowsums = apply(confmat, 1, sum) # number of instances per class
+  colsums = apply(confmat, 2, sum) # number of predictions per class
+  p = rowsums / n # distribution of instances over the actual classes
+  q = colsums / n # distribution of instances over the predicted classes
+  accuracy = sum(di) / n
+  precision = di / colsums 
+  recall = di / rowsums 
+  f1 = 2 * precision * recall / (precision + recall)
+  ErrorRates = 1-accuracy
+  print('Accuracy:')
+  print(accuracy)
+  print('Precision:')
+  print(precision)
+  print('Recall:')
+  print(recall)
+  print('F1 Score:')
+  print(f1)
+  print('Error Rates')
+  print(ErrorRates)
+}
+
+set.seed(34)
+sampleBankData <- markData[sample(nrow(markData),10000), ]
+s.train.index <- createDataPartition(sampleBankData$decision , p=0.7, list=FALSE)
+s_bankDataTrain <- markData[s.train.index, ]
+s_bankDataTest <- markData[-s.train.index,  ]
+s_smote_train <- SMOTE(decision ~ ., data  = s_bankDataTrain)
+
+
+#Creating Train and Test
+train.index <- createDataPartition(markData$decision , p=0.7, list=FALSE)
+bankDataTrain <- markData[train.index, ]
+bankDataTest <- markData[-train.index,  ]
+smote_train <- SMOTE(decision ~ ., data  = bankDataTrain)
+
+```
+
+
+# Machine Learning Models
+Before applying machine learning, Data is to be partitioned into test and train Datasets. Any algorithm have a set of parmaeters which define the models. Hyperparameter tuning gives the best possible values for the parameters.Each model is built with parmeter values from hyperparameter tuning and is trained with train dataset. Predictions are compared by implemeting using testData.
+
+##  Support vector machine(SVM)
+
+### Hyper Parameter tuning
+
+Choosing the kernel for SVM gives the set of parameters. For radial kernel, cost and gamma defines the model output. Post hyperparameter tuning the values for the parameters like cost and gamma are 10 and 0.1 respectively implies that a model built with these values gives the best possible SVM results for the data.
+
+```{r echo =FALSE}
+hyperParameters <- tune.svm(x = s_smote_train[, -1], y = as.factor(s_smote_train$decision),
+              type = "C-classification",
+               cost=c(1, 10, 20, 50), 
+              gamma = c(0.01, 0.1, 0.5))
+
+plot(hyperParameters)
+```
+
+
+
+```{r  echo=FALSE}
+
+bankModelSVM <- svm(decision~., data=smote_train ,type='C',kernel = 'radial',gamma =0.1,cost = 10 )
+#summary(bankModelSVM)
+svmPred_train <- predict(bankModelSVM,smote_train,type="class")
+svmPred_test <- predict(bankModelSVM,bankDataTest,type="class")
+```
+
+### SVM Results
+
+Prediction results of the model are as below. Model is giving an accuracy of 83.9% and recall score of positive target variable is 61%. 
+
+```{r echo=FALSE}
+
+# confusion matrix
+svm_train_matrix <- as.matrix(table(Actual = smote_train$decision, Predicted = svmPred_train), positive='1')
+svm_test_matrix <- as.matrix(table(Actual = bankDataTest$decision, Predicted = svmPred_test), positive='1')
+svm_test_matrix
+
+#Classification Report
+#classification_report(svm_train_matrix)
+classification_report(svm_test_matrix)
+
+```
+
+
+
+## Random Forest
+Hyper parameter tuning included finding best balue for mtry and max.depth parameters. In this case the best parameters is 5 for mtry. Though value of 1 seems to give the best model, there is no marginal difference when compared with that of 5. 
+ 
+```{r echo=FALSE}
+
+randomFParameters <- tune.randomForest(x = s_smote_train[,-1], y = as.factor(s_smote_train$decision), max.depth = seq(3, 15, 3),mtry = seq(1,10,2), )
+plot(randomFParameters)
+```
+
+
+```{r echo =FALSE}
+randomFClassifier <- randomForest(decision ~ ., data = smote_train, max.depth = 5 , mtry = 5)
+randomFTrainResults <- predict(randomFClassifier,smote_train,type='class')
+#summary(randomFTrainResults)
+randomFTestResults <- predict(randomFClassifier,bankDataTest,type = 'class')
+
+```
+
+### Random Forest Results
+
+Prediction results of the model are as below. Model is giving an accuracy of 84.8% and recall score of positive target variable is 72%. 
+```{r echo=FALSE}
+# confusion matrix
+cm_randomFTrainResults <- as.matrix(table(Actual = smote_train$decision,Predicted = randomFTrainResults), positive='1')
+cm_randomFTestResults <- as.matrix(table(Actual = bankDataTest$decision, Predicted = randomFTestResults), positive='1')
+cm_randomFTestResults
+
+#Classification Report
+#classification_report(cm_randomFTrainResults)
+classification_report(cm_randomFTestResults)
+
+
+```
+
+
+## K-nearest neighbours
+
+Hyperparameter tuning of KNN includes finding best K value for the dataset. K value of 7 gives the best results in this case.
+```{r echo = FALSE}
+
+knn.bestParameters <- tune.knn(x = s_smote_train[,-1], y = as.factor(s_smote_train[,1]), k = seq(1,20,3), tunecontrol=tune.control(sampling = "boot") )
+plot(knn.bestParameters)
+```
+
+### KNN Results.
+
+Prediction results of the model are as below. Model is giving an accuracy of 85.13% and recall score of positive target variable is 74.4%.
+
+```{r echo = FALSE}
+
+knnPred <- knn(train=smote_train, test=bankDataTest, cl=smote_train$decision, k=7)
+
+knnAccuracy <- 100 * sum(bankDataTest$decision == knnPred)/NROW(bankDataTest$decision)
+knnAccuracy
+
+cm_knnResults <- as.matrix(table(Actual = bankDataTest$decision,Predicted = knnPred), positive = '1')
+cm_knnResults
+classification_report(cm_knnResults)
+
+```
+
+
+# Conclusion:
+
+After preprocessing, EDA and PCA of data, smote sampling is done to handle the bias in the target variable. Three classification algorithms(SVM, randomForest and KNN) are implemented on the data set.
+Main motto of the campaign is to find the customer records with good chance of converision. So more than accuracy, recall score determines the model in this case.Out of the 3 algorithms, KNN with a recall score of 74.4 and an error rate of 0.14 gives the best model. 
+
